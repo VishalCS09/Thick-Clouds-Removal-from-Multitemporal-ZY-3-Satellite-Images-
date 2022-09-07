@@ -1,0 +1,102 @@
+from DataReader import DataReader
+import tensorflow as tf
+import numpy as np
+import os, shutil
+from tensorflow.keras.layers import *
+import glob
+import random
+from PIL import Image
+import cv2
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+n_epochs = 100
+batch_size = 8
+learning_rate = 1e-4
+weight_decay = 1e-4
+
+def showImage(x):
+  x = np.asarray(x*255,dtype=np.int32)
+  plt.figure()
+  plt.imshow(x)
+  plt.show()
+
+def generateCNNModel(RGB):
+    cnn1 = Conv2D(3,1,1,padding="same",activation="softsign",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-4))(RGB)#layer 1 to extract content
+    cnn2 = Conv2D(3,3,1,padding="same",activation="softsign",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-4))(cnn1)#layer 2 to extract texture
+    dense1 = tf.concat([cnn1,cnn2],axis=-1) #concatenate layer1 and layer2 to combine layers
+    cnn3 = Conv2D(3,5,1,padding="same",activation="softsign",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-4))(dense1)
+    dense2 = tf.concat([cnn2,cnn3],axis=-1)#concatenate layer2 and layer3 to combine laayers
+    cnn4 = Conv2D(3,7,1,padding="same",activation="softsign",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-4))(dense2)  #layer to extrcat spectral data
+    decoder = tf.concat([cnn1,cnn2,cnn3,cnn4],axis=-1)
+    cnn5 = Conv2D(3,3,1,padding="same",activation="softsign",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-4))(decoder)
+    MAX = cnn5 #max layer
+    cnnmodel = ReLU(max_value=1.0)(tf.math.multiply(MAX,RGB) - MAX + 1.0) #replace texture pixels with high intensity pixels
+    return cnnmodel
+
+dr = DataReader()
+np.random.seed(9999)
+tf.reset_default_graph()
+hr_train_data,lr_val_data = dr.readImages('Dataset/clear','Dataset/cloudy')
+#lr_val_data = dr.readImages('data/hazy_images')
+train_init_op, val_init_op, iterator = dr.generateExtensionTrainTestImages(hr_train_data,lr_val_data)
+next_element = iterator.get_next()
+
+X = tf.placeholder(shape=(None,128,128,3),dtype=tf.float32)
+Y = tf.placeholder(shape=(None,128,128,3),dtype=tf.float32)
+reconstruct_X = generateCNNModel(X)
+
+loss = tf.reduce_mean(tf.square(reconstruct_X-Y))
+optimizer = tf.train.AdamOptimizer(learning_rate)
+trainable_variables = tf.trainable_variables()
+gradients_and_vars = optimizer.compute_gradients(loss,trainable_variables)
+clipped_gradients = [(tf.clip_by_norm(gradient,0.1),var) for gradient,var in gradients_and_vars]
+optimizer = optimizer.apply_gradients(gradients_and_vars)
+
+saver = tf.train.Saver()
+load_path = None
+
+with tf.device('/cpu:0'):
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        for epoch in range(n_epochs):
+            sess.run(train_init_op)
+            batches = len(hr_train_data) // batch_size
+            epoch_loss = 0.0
+            for batch in range(batches):
+                batch_data = sess.run(next_element)
+                batch_loss, _ = sess.run([loss,optimizer],feed_dict={X:batch_data[0],Y:batch_data[1]})
+                epoch_loss += batch_loss / float(batches)
+                if batch % 1000 == 0:
+                  print("Training loss at batch %d: %f\n"%(batch,batch_loss))
+            train_loss = epoch_loss
+
+            sess.run(val_init_op)
+            batches= len(lr_val_data) // batch_size
+            epoch_loss = 0.0
+            for batch in range(batches):
+                batch_data = sess.run(next_element)
+                batch_loss = sess.run(loss,feed_dict={X:batch_data[0], Y:batch_data[1]})
+                epoch_loss += batch_loss / float(batches)
+                if batch % 100 == 0:
+                    print("Validation loss at batch %d: %f\n"%(batch,batch_loss))
+                    for j in range(-2 + batch_size//2):
+                        x = batch_data[0][j].reshape((1,)+batch_data[0][j].shape)
+                        y = batch_data[1][j].reshape((1,)+batch_data[1][j].shape)
+                        reconstruct_x = sess.run(reconstruct_X,feed_dict={X:x,Y:y})
+                        print("Image Number: %d\n"%(j))
+                        #print(str(reconstruct_x[0]))
+                        #showImage(x[0])
+                        #showImage(y[0])
+                        #showImage(dehazed_x[0])
+            val_loss = epoch_loss
+
+            saver.save(sess,'./models/model_checkpoint_' + str(epoch) + '.ckpt')
+      
+            print("Epoch %d\nTraining loss: %f\nValidation loss: %f\n\n"%(epoch,train_loss,val_loss))
