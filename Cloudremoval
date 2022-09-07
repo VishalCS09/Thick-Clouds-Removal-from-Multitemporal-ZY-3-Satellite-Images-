@@ -1,0 +1,139 @@
+from tkinter import *
+import tkinter
+from tkinter import filedialog
+import matplotlib.pyplot as plt
+from tkinter.filedialog import askopenfilename
+import tensorflow.compat.v1 as tf
+import numpy as np
+from tensorflow.keras.layers import *
+from PIL import Image
+import matplotlib.pyplot as plt
+from DataReader import DataReader
+import cv2
+#from skimage.metrics import structural_similarity as ssim
+import matplotlib as mpl
+from math import log10, sqrt
+import pickle
+from keras.models import model_from_json
+tf.compat.v1.disable_eager_execution()
+main = tkinter.Tk()
+main.title("Thick Clouds Removal From Multitemporal ZY-3 Satellite Images Using Deep Learning")
+main.geometry("1200x1200")
+
+
+global resegmentation_model
+global saver
+global RGB
+global MAX
+global resegmented_Image
+
+def cnnModel(RGB):
+    cnn1 = Conv2D(3,1,1,padding="same",activation="relu",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-8))(RGB)#layer 1 to extract content
+    cnn2 = Conv2D(3,3,1,padding="same",activation="relu",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-8))(cnn1)#layer 2 to extract texture
+    dense1 = tf.concat([cnn1,cnn2],axis=-1) #concatenate layer1 and layer2 to combine layers
+    cnn3 = Conv2D(3,5,1,padding="same",activation="relu",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-8))(dense1)
+    dense2 = tf.concat([cnn2,cnn3],axis=-1)#concatenate layer2 and layer3 to combine laayers
+    cnn4 = Conv2D(3,7,1,padding="same",activation="relu",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-8))(dense2)  #layer to extrcat spectral data
+    decoder = tf.concat([cnn1,cnn2,cnn3,cnn4],axis=-1)
+    cnn5 = Conv2D(3,3,1,padding="same",activation="relu",use_bias=True,kernel_initializer=tf.initializers.random_normal(stddev=0.02),
+                   kernel_regularizer=tf.keras.regularizers.l2(1e-8))(decoder)
+    MAX = cnn5 #max layer
+    cnnmodel = ReLU(max_value=10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000)(tf.math.multiply(MAX+RGB,RGB) - MAX + 0.000000000000000000000000001) 
+    return cnnmodel
+
+def loadModel():
+    global resegmentation_model
+    global saver
+    global RGB
+    global MAX
+    dr = DataReader()  #class to read training images
+    tf.compat.v1.reset_default_graph() #reset tensorflow graph
+
+    hr_train_data,lr_val_data = dr.readImages('Dataset/clear','Dataset/cloudy')
+    
+    
+    trainData, testData, itr = dr.generateExtensionTrainTestImages(hr_train_data,lr_val_data)
+    
+    next_element = itr.get_next()
+
+    RGB = tf.placeholder(shape=(None,128, 128,3),dtype=tf.float32)
+    MAX = tf.placeholder(shape=(None,128, 128,3),dtype=tf.float32)
+    resegmentation_model = cnnModel(RGB) #loading and generating model
+
+    trainingLoss = tf.reduce_mean(tf.square(resegmentation_model-MAX)) #optimizations
+    optimizerRate = tf.train.AdamOptimizer(1e-4)
+    trainVariables = tf.trainable_variables()
+    gradient = optimizerRate.compute_gradients(trainingLoss,trainVariables) #gradient applied
+    clippedGradients = [(tf.clip_by_norm(gradients,0.1),var1) for gradients,var1 in gradient]
+    optimize = optimizerRate.apply_gradients(gradient)
+
+    saver = tf.train.Saver()
+    pathlabel.config(text='CNN model loaded')
+
+
+    
+    
+#function to allow user to upload images directory
+def clearImage():
+    global resegmented_Image
+    global resegmentation_model
+    global errorMap_image
+    filename = askopenfilename(initialdir = "testImages")
+    pathlabel.config(text=filename)
+    with tf.compat.v1.Session() as session:
+        saver.restore(session,'./models/model_checkpoint_99.ckpt')
+        img = Image.open(filename)
+        img = img.resize((128, 128))
+        img = np.asarray(img) / 255.0
+        img = img.reshape((1,) + img.shape)
+        #img = np.stack((img,)*3, axis=-1)
+        resegmented_Image = session.run(resegmentation_model,feed_dict={RGB:img,MAX:img})
+        resegmented_Image = resegmented_Image[0]
+        figure, axis = plt.subplots(nrows=1, ncols=2,figsize=(7,7))
+        axis[0].set_title("Cloudy Image")
+        axis[1].set_title("Cleared Image")
+        axis[0].imshow(img[0])
+        axis[1].imshow(resegmented_Image)
+        figure.tight_layout()
+        plt.show()
+
+
+
+font = ('times', 14, 'bold')
+title = Label(main, text='Thick Clouds Removal From Multitemporal ZY-3 Satellite Images Using Deep Learning')
+title.config(bg='brown', fg='white')  
+title.config(font=font)           
+title.config(height=3, width=120)       
+title.place(x=5,y=5)
+
+font1 = ('times', 14, 'bold')
+loadmodel = Button(main, text="Generate & Load CNN Model", command=loadModel)
+loadmodel.place(x=50,y=100)
+loadmodel.config(font=font1)  
+
+pathlabel = Label(main)
+pathlabel.config(bg='brown', fg='white')  
+pathlabel.config(font=font1)           
+pathlabel.place(x=430,y=100)
+
+step1Button = Button(main, text="Upload & Clear Cloudy Image", command=clearImage)
+step1Button.place(x=50,y=150)
+step1Button.config(font=font1)
+
+
+
+
+font1 = ('times', 12, 'bold')
+text=Text(main,height=14,width=150)
+scroll=Scrollbar(text)
+text.configure(yscrollcommand=scroll.set)
+text.place(x=10,y=400)
+text.config(font=font1)
+
+
+main.config(bg='brown')
+main.mainloop()
